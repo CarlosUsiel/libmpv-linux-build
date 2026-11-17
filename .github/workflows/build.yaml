@@ -1,33 +1,26 @@
 name: Build MPV
 
+# PT fork (pt-filters): manual runs only; x86_64 only (the only Linux arch PT ships); artifacts only, no release.
+# Same tag 20260810 sources: ffmpeg n7.1.5, dav1d 1.5.4, libplacebo/mpv pinned hashes (upstream), and the
+# branch-tracking deps (libass, uchardet, bzip2, libxpresent, rubberband, libdisplay-info) reset to their
+# state at the upstream release run start (2026-08-10T10:49:33Z, run 31380811283). Runner pinned to
+# ubuntu-24.04 (the release binary was built with GCC 13.3.0-6ubuntu2~24.04.1).
 on:
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
-    inputs:
-      logLevel:
-        description: 'Log level'     
-        required: true
-        default: 'warning'
-      github_release:
-        description: 'Upload to Github release'
-        required: false
-        default: false
-        type: boolean
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  PIN_DATE: "2026-08-10T10:49:33Z"
 
 jobs:
   build:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             arch: x86_64
-          - os: ubuntu-24.04-arm
-            arch: aarch64
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -100,7 +93,7 @@ jobs:
         printf "%s\n" "--enable-encoder=*_at,aac,gif,h26[3-4]*,av1*,hevc*,mjpeg*,*png,opus,pcm*,prores*,rawvideo,spdif,speedhq,*jpeg,*png,vp[8-9]*,wrapped_avframe" >> ffmpeg_options
         printf "%s\n" "--enable-muxer=*jpeg,fifo,flv,gif,hls,h264,hevc,image2,mov,mp4,mpegts,matroska,null,pcm*,rawvideo,rt*,spdif,*pipe,*segment,webm,wav" >> ffmpeg_options
         printf "%s\n" "--enable-protocol=cache,concat*,crypto*,data,fd,*file,ftp,h*,i*,pipe,rt*,s*,t*,u*" >> ffmpeg_options
-        printf "%s\n" "--enable-filter=*null*,afade,*fifo,*format,*resample,aeval,atempo,pan,crop,eq*,framerate,hw*,loudnorm,scale,volume,yadif*" >> ffmpeg_options
+        printf "%s\n" "--enable-filter=*null*,afade,*fifo,*format,*resample,aeval,atempo,pan,crop,eq*,acompressor,alimiter,framerate,hw*,loudnorm,scale,volume,yadif*" >> ffmpeg_options
 
         > mpv_options
         printf "%s\n" -Dlibmpv=true >> mpv_options
@@ -135,6 +128,10 @@ jobs:
         echo "updating submodules"
 
         ./update
+
+        echo "pinning branch-tracking sources to $PIN_DATE"
+        bash ${GITHUB_WORKSPACE}/.github/pt/pin_sources.sh ${MPV_BUILD_PATH} "$PIN_DATE" ffmpeg dav1d libplacebo mpv
+        for d in */; do [ -d "$d/.git" ] && echo "SRC ${d%/} $(git -C $d rev-parse --short=12 HEAD) $(git -C $d log -1 --format=%cI HEAD)"; done
 
         echo "applying patches to ffmpeg"
         
@@ -171,57 +168,20 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/artifacts
         cp -r mpv/build/* $GITHUB_WORKSPACE/artifacts
 
+    - name: Package (same layout as the upstream release zips)
+      run: |
+        cd $GITHUB_WORKSPACE
+        mkdir -p pt_out
+        zip -j pt_out/libmpv_${{ matrix.arch }}.zip artifacts/libmpv.so.2
+        cd include
+        zip -r ../pt_out/libmpv_${{ matrix.arch }}_header.zip mpv/
+        cd ..
+        ls -la pt_out
+        sha256sum pt_out/*
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: mpv-binary-${{ matrix.arch }}
-        path: artifacts
-
-    - name: Prepare release packages
-      if: ${{ github.event.inputs.github_release == 'true'}}
-      run: |
-        short_date=$(date "+%Y%m%d")
-        
-        # Set release tag as environment variable
-        echo "RELEASE_TAG=${short_date}" >> $GITHUB_ENV
-        
-        # Package libmpv.so.2
-        libmpv_file="$GITHUB_WORKSPACE/artifacts/libmpv.so.2"
-        libmpv_archive="libmpv_${{ matrix.arch }}.zip"
-        
-        if [ -f "$libmpv_file" ]; then
-          echo "Packaging libmpv.so.2 as $libmpv_archive"
-          zip -j $libmpv_archive $libmpv_file
-        else
-          echo "libmpv.so.2 not found at $libmpv_file"
-          exit 1
-        fi
-        
-        # Package header files from include/mpv
-        header_dir="$GITHUB_WORKSPACE/include/mpv"
-        header_archive="libmpv_${{ matrix.arch }}_header.zip"
-        
-        if [ -d "$header_dir" ]; then
-          echo "Packaging header files from $header_dir as $header_archive"
-          cd $GITHUB_WORKSPACE/include
-          zip -r $GITHUB_WORKSPACE/$header_archive mpv/
-          cd $GITHUB_WORKSPACE
-        else
-          echo "Header directory not found at $header_dir"
-          exit 1
-        fi
-
-    - name: Create Github release
-      if: ${{ github.event.inputs.github_release == 'true'}}
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ env.RELEASE_TAG }}
-        name: ${{ env.RELEASE_TAG }}
-        body: |
-          **Workflow run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        files: |
-          libmpv_*.zip
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: libmpv-${{ matrix.arch }}
+        path: pt_out
+        retention-days: 7
